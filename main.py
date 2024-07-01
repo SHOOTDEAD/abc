@@ -8,6 +8,10 @@ import sys
 from mail import BratzMail
 import hashlib
 import threading
+import boto3
+import json
+from sqlalchemy import or_,and_
+
 sys.setrecursionlimit(2000)
 app=FastAPI()
 
@@ -33,16 +37,89 @@ def email(uid:str,ptid:str):
     ptmail = list(Session.query(BasicTrainer.email).filter(BasicTrainer.ptid == ptid))[0][0]
     return uemail,ptmail
 print(DateFormat("2024-7-9")=="2024-07-9")
-# @app.post("/signin")
-# def signin():
-#     ...
+
+region_name = 'ap-south-1'
+sns_client = boto3.client(
+    'sns',
+    region_name=region_name,
+    aws_access_key_id='AKIAXYKJVQF5DIZS6WWZ',
+    aws_secret_access_key='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'
+)
+
+
+sns_application_arn = "arn:aws:sns:ap-south-1:533267317114:app/GCM/gym"
+
+def create_platform_endpoint(device_token):
+    try:
+        response = sns_client.create_platform_endpoint(
+            PlatformApplicationArn=sns_application_arn,
+            Token=device_token
+        )
+        return response['EndpointArn']
+    except boto3.exceptions.Boto3Error as e:
+        print(f"An error occurred while creating the endpoint: {e}")
+
+def send_push_notification(endpoint_arn, title, body, custom_data=None):
+    # Construct the message data
+    message_data = {
+        'title': title,
+        'body': body
+    }
+
+    if custom_data:
+        message_data.update(custom_data)
+
+    # Construct the payload
+    payload = {
+        'default': body,
+        'GCM': json.dumps({
+            'notification': {
+                'title': title,
+                'body': body
+            },
+            'data': message_data
+        })
+    }
+
+    # Convert payload to JSON string
+    payload_json = json.dumps(payload)
+
+    try:
+        # Publish the message to the SNS endpoint
+        response = sns_client.publish(
+            TargetArn=endpoint_arn,
+            MessageStructure='json',
+            Message=payload_json
+        )
+        return response
+    except boto3.exceptions.Boto3Error as e:
+        print(f"An error occurred while sending the notification: {e}")
+
+
+
+
+
+
+def notify(device_token, title, body, custom_data:dict):
+    endpoint_arn = create_platform_endpoint(device_token)
+    if endpoint_arn:
+        send_push_notification(endpoint_arn, title, body, custom_data)
+    else:
+        print("Failed to create endpoint.")
+
+
+
 @app.post('/sign_in')
 def sign_in(req:Auth1):
     data = list(Session.query(Auth.id,Auth.passwd).filter(Auth.phone==int(req.phone)))
     if data:
         if data[0][1] != req.passwd:
             raise HTTPException(401,'wrong password')
-        Session.add(Notification(data[0][0],req.token))
+        data=Session.query(Notification.token).filter(Notification.id==data[0][0])
+        if not list(data):
+            Session.add(Notification(data[0][0],req.token))
+        else:
+            data.update({"token":req.token})
         Session.commit()
         return data[0][0]
     raise HTTPException(405,'user not registered')
@@ -180,6 +257,7 @@ def auto_schudule(req:AutoSchudle):
         Session.add(PtDetails(req.uid,req.ptid,uname,ptname))
     umail,ptmail=email(req.uid,req.ptid)
     BratzMail.reciverMailid=umail
+
     # print(slots[0].date)
     with open(auto, 'r') as f:
         data = f.read()
@@ -187,12 +265,19 @@ def auto_schudule(req:AutoSchudle):
         uname=list(Session.query(BasicClient.name).filter(BasicClient.uid==req.uid))[0][0]
         data=data.replace("[FUCKU]",uname)
     threading.Thread(target=BratzMail.text_mail,args=('Confirmation on schedule of Personal Training sessions',data)).start()
+    # tokens=
+    utoken,ptoken=0,0
+    for i in list(Session.query(Notification.token).filter(or_(Notification.id==req.ptid,Notification.id==req.uid))):
+        if i[0][:2]=="PT":
+            ptoken=i[0]
+        else:utoken=i[0]
+    threading.Thread(target=notify,args=(utoken,"PT-Schedule",f"YOUR SESSION STARTS FROM {slots[0].date}")).start()
     with open(autott,'r') as f:
         d=f.read()
         pname=list(Session.query(BasicTrainer.name).filter(BasicTrainer.ptid==req.ptid))[0][0]
         d=d.replace("[Trainer's Name]",pname)
         d=d.replace("[Client's Name]",uname)
-
+    threading.Thread(target=notify,args=(ptoken,"PT-Schedule",f"your session with {uname} starts on {slots[0].data}")).start()
     threading.Thread(target=BratzMail.text_mail,args=('Confirmation on schedule of Personal Training sessions',d,ptmail)).start()
 
     Session.bulk_save_objects(slots)
@@ -270,18 +355,24 @@ def place_request(req:PlaceRequest):
     print(l,req.to_slot,l.issuperset({req.to_slot}))
     if l.issuperset({req.to_slot}):
         raise HTTPException(403,"Requested Session Already Booked by someone else")
+    utoken,ptoken=0,0
+    for i in list(Session.query(Notification.token).filter(or_(Notification.id==ptid,Notification.id==uid))):
+        if i[0][:2]=="PT":
+            ptoken=i[0]
+        else:utoken=i[0]
     if to=="CT":
         with open(resttc,'r') as f:
             ptname,uname,ptid,uid=list(Session.query(PtDetails.ptname,PtDetails.uname,PtDetails.ptid,PtDetails.uid).filter(PtDetails.uid==uid))[0]
             ptmail,umail=list(Session.query(BasicTrainer.email,BasicClient.email).filter(BasicTrainer.ptid==ptid,BasicClient.uid==uid))[0]
             print(ptname,uname,ptid,uid,ptmail,umail)
+            
             d=f.read()
             d=d.replace("[FUCKU]",uname)
             d=d.replace('[Original Date]',c_date.strftime("%Y-%m-%d"))
             d=d.replace('[Requested Date]',req.to_date)
             d=d.replace('[Trainer name]',ptname)
         threading.Thread(target=BratzMail.text_mail,args=(' Request to Reschedule Your Training Session',d,umail)).start()
-
+        threading.Thread(target=notify,args=(utoken,"SESSION RESCHEDULE",f"{ptname} request for reschedule session")).start()
             # d=d.replace()
     else:
         with open(resctt,'r') as f:
@@ -294,6 +385,7 @@ def place_request(req:PlaceRequest):
             d=d.replace('[Requested Date]',req.to_date)
             d=d.replace('[Client name]',uname)
         threading.Thread(target=BratzMail.text_mail,args=(' Request to Reschedule MY Training Session',d,ptmail)).start()
+        threading.Thread(target=notify,args=(ptoken,"SESSION RESCHEDULE",f"{uname} request for reschedule session")).start()
     Session.add(ReschudleRequest(retoken,uid,ptid,c_slot,c_date,req.to_slot,req.to_date,10,to)) #10=>requested ,20=>Rejected,30>Accepted
     Session.commit()
     return f"Request for rescheduling of PT on Date: {req.to_date} Slot: {req.to_slot} had been placed successfully"
@@ -361,6 +453,7 @@ def accept_request(req:AcceptRequest):
     print(query_data)
     if query_data[0][-2]!=10:
         raise HTTPException(403,"REQUEST HAVE ALREADY PRROCESSED")
+    
     if req.status==20:
         if req.id[:2]=="CT":
             with open(rctt,'r') as f:
@@ -370,7 +463,13 @@ def accept_request(req:AcceptRequest):
                 d=d.replace('[FUCKU]',ptname)
                 d=d.replace('[New Date]',query_data[0][-3].strftime("%Y-%m-%d"))
                 d=d.replace("[Client's Name]",uname)
+                utoken,ptoken=0,0
+                for i in list(Session.query(Notification.token).filter(or_(Notification.id==ptid,Notification.id==uid))):
+                    if i[0][:2]=="PT":
+                        ptoken=i[0]
+                    else:utoken=i[0]
                 threading.Thread(target=BratzMail.text_mail,args=("Rejection of Rescheduled Training Session",d,ptmail)).start()
+                threading.Thread(target=notify,args=(ptoken,"reschedule request rejected",f"{uname} has rejected rescheduling the session")).start()
         else:
             with open(rttc,'r') as f:
                 d=f.read()
@@ -379,6 +478,12 @@ def accept_request(req:AcceptRequest):
                 d=d.replace('[FUCKU]',uname)
                 d=d.replace("[New Date]",query_data[0][-3].strftime("%Y-%m-%d"))
                 d=d.replace("[Trainer's Name]",ptname)
+                utoken,ptoken=0,0
+                for i in list(Session.query(Notification.token).filter(or_(Notification.id==ptid,Notification.id==uid))):
+                    if i[0][:2]=="PT":
+                        ptoken=i[0]
+                    else:utoken=i[0]
+                threading.Thread(target=notify,args=(utoken,"reschedule request rejected",f"{ptname} has rejected rescheduling the session")).start()
                 threading.Thread(target=BratzMail.text_mail,args=("Rejection of Rescheduled Training Session",d,umail)).start()
         Session.query(ReschudleRequest).filter(ReschudleRequest.token==req.rescheduleid).update({"status":20})
         Session.commit()
@@ -392,6 +497,12 @@ def accept_request(req:AcceptRequest):
                 d=d.replace('[FUCKU]',ptname)
                 d=d.replace('[New Date]',query_data[0][-3].strftime("%Y-%m-%d"))
                 d=d.replace("[Client's Name]",uname)
+                utoken,ptoken=0,0
+                for i in list(Session.query(Notification.token).filter(or_(Notification.id==ptid,Notification.id==uid))):
+                    if i[0][:2]=="PT":
+                        ptoken=i[0]
+                    else:utoken=i[0]
+                threading.Thread(target=notify,args=(ptoken,"reschedule request accepted",f"{uname} has accepted your reschedule request")).start()
                 threading.Thread(target=BratzMail.text_mail,args=("Confirmation of Rescheduled Training Session",d,ptmail)).start()
         else:
             with open(amttc,'r') as f:
@@ -401,6 +512,12 @@ def accept_request(req:AcceptRequest):
                 d=d.replace('[FUCKU]',uname)
                 d=d.replace("[New Date]",query_data[0][-3].strftime("%Y-%m-%d"))
                 d=d.replace("[Trainer name]",ptname)
+                utoken,ptoken=0,0
+                for i in list(Session.query(Notification.token).filter(or_(Notification.id==ptid,Notification.id==uid))):
+                    if i[0][:2]=="PT":
+                        ptoken=i[0]
+                    else:utoken=i[0]
+                threading.Thread(target=notify,args=(utoken,"reschedule request accepted",f"{ptname} has accepted your reschedule request")).start()
                 threading.Thread(target=BratzMail.text_mail,args=("Confirmation of Rescheduled Training Session",d,umail)).start()
  
         Session.query(ReschudleRequest).filter(ReschudleRequest.token==req.rescheduleid).update({"status":30})
