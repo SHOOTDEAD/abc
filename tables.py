@@ -5,7 +5,14 @@ from sqlalchemy.orm import sessionmaker
 
 Base = declarative_base()
 
-
+class Notification(Base):
+    __tablename__="notificaion"
+    i=Column(Integer,autoincrement=True,primary_key=True,nullable=False)
+    id=Column(String(20))
+    token=Column(String(200))
+    def __init__(self,id,token):
+        self.id=id
+        self.token=token
 class Auth(Base):
     __tablename__="auth"
     i=Column(Integer,autoincrement=True,primary_key=True,nullable=False)

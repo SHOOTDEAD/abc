@@ -50,3 +50,7 @@ class AcceptRequest(BaseModel):
     rescheduleid:str
     status:int
     
+class Auth1(BaseModel):
+    phone:int
+    passwd:str
+    token:str
