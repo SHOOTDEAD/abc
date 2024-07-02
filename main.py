@@ -120,7 +120,8 @@ def sign_in(req:Auth1):
         if not list(dat):
             Session.add(Notification(list(data)[0][0],req.token))
         else:
-            data.update({"token":req.token})
+            dat.token=req.token
+#            dat.update({"token":req.token})
         Session.commit()
         return list(data)[0][0]
     raise HTTPException(405,'user not registered')
